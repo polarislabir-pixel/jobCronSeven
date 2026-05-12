@@ -28,7 +28,7 @@ const GOAT_CATEGORIES = new Set([
 ]);
 
 // Companies blacklisted from the GOAT channel (case-insensitive substring match)
-const GOAT_COMPANY_BLACKLIST = ["targetjobs", "greenwich"];
+const GOAT_COMPANY_BLACKLIST = ["targetjobs", "greenwich", "hackajob"];
 
 // Seniority levels that qualify for the GOAT channel
 const GOAT_SENIORITY = new Set(["Mid", "Entry"]);
