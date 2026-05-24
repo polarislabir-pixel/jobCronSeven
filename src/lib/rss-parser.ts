@@ -8,18 +8,66 @@ export class RSSParseError extends Error {
 }
 
 /**
- * Parses a single RSS feed and extracts job items
+ * Per-feed conditional-fetch cache.
+ *
+ * Survives between invocations of the same warm function instance, dies on
+ * cold start. Vercel Fluid keeps functions warm during cron streaks so this
+ * pays off heavily — most ticks fetch nothing and re-emit the cached job
+ * list, skipping cheerio/regex parsing entirely.
+ *
+ * Safety: the server only returns 304 when the response body byte-equals
+ * the prior response. Any feed change → 200 + fresh body → we re-parse.
+ * The only way to lose data here is a server lying about freshness, which
+ * would break every HTTP caching client and is out of scope for us.
+ *
+ * The TTL caps cache age in case a server returns 304 indefinitely without
+ * actually being current (rare but observed in some malformed providers).
+ */
+interface FeedCacheEntry {
+  etag?: string;
+  lastModified?: string;
+  jobs: JobItem[];
+  cachedAt: number;
+}
+const FEED_CACHE = new Map<string, FeedCacheEntry>();
+const FEED_CACHE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour hard ceiling
+
+/**
+ * Parses a single RSS feed and extracts job items.
+ * Uses If-None-Match / If-Modified-Since to short-circuit when feed unchanged.
  */
 async function parseSingleFeed(url: string): Promise<JobItem[]> {
   try {
-    console.log(`[RSS] Fetching feed: ${url.substring(0, 60)}...`);
+    const cached = FEED_CACHE.get(url);
+    const cacheIsFresh = cached && (Date.now() - cached.cachedAt) < FEED_CACHE_MAX_AGE_MS;
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (compatible; JobMonitor/1.0)',
+    };
+    if (cacheIsFresh && cached?.etag) {
+      headers['If-None-Match'] = cached.etag;
+    }
+    if (cacheIsFresh && cached?.lastModified) {
+      headers['If-Modified-Since'] = cached.lastModified;
+    }
+
     const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; JobMonitor/1.0)',
-      },
-      cache: 'no-store', // Disable caching to always get fresh RSS data
-      next: { revalidate: 0 }, // Next.js specific: disable caching
+      headers,
+      // No browser/Next cache layer — we manage staleness ourselves above.
+      cache: 'no-store',
+      next: { revalidate: 0 },
     });
+
+    // 304 Not Modified — server confirms our cached body is still current.
+    // Return the cached jobs and avoid the parse cost entirely.
+    if (response.status === 304 && cached) {
+      console.log(`[RSS] 304 cached (${cached.jobs.length} jobs): ${url.substring(0, 60)}...`);
+      // Refresh the cachedAt so the cache TTL stays sliding while the feed
+      // is genuinely stable. Without this, a perpetually-unchanged feed
+      // would force a re-parse every hour for no reason.
+      cached.cachedAt = Date.now();
+      return cached.jobs;
+    }
 
     if (!response.ok) {
       throw new RSSParseError(
@@ -29,11 +77,18 @@ async function parseSingleFeed(url: string): Promise<JobItem[]> {
     }
 
     const xmlText = await response.text();
-    console.log(`[RSS] Received ${xmlText.length} bytes from feed`);
+    console.log(`[RSS] 200 (${xmlText.length}b): ${url.substring(0, 60)}...`);
     const jobs = extractJobsFromXML(xmlText);
-    // Add source URL to each job
     jobs.forEach(job => job.sourceUrl = url);
-    console.log(`[RSS] Parsed ${jobs.length} jobs from feed`);
+
+    // Store the parsed jobs + the validators for the next fetch.
+    FEED_CACHE.set(url, {
+      etag: response.headers.get('etag') ?? undefined,
+      lastModified: response.headers.get('last-modified') ?? undefined,
+      jobs,
+      cachedAt: Date.now(),
+    });
+
     return jobs;
   } catch (error) {
     if (error instanceof RSSParseError) {

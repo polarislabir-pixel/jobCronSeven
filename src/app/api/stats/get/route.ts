@@ -85,11 +85,23 @@ export async function GET(request: NextRequest) {
 
     if (allJobs.length > 0) {
       // Process each job and extract metadata
+      let skippedKnown = 0;
       for (const rssJob of allJobs) {
         try {
           // Skip if URL is invalid
           if (!rssJob.link || !rssJob.link.includes('http')) {
             logger.warn(`Skipping job with invalid URL: ${rssJob.title}`);
+            continue;
+          }
+
+          // Short-circuit: if the URL is already in the dedup index, skip the
+          // entire heavy extractor pipeline (job-analyzer, metadata, salary,
+          // location, software, programming, role-type — all regex-heavy).
+          // `addJob` would reject it anyway; this just avoids the wasted CPU.
+          // On a typical tick 95%+ of RSS items are known URLs.
+          if (statsCache.isKnownUrl?.(rssJob.link)) {
+            skippedKnown++;
+            processedCount++;
             continue;
           }
 
@@ -230,12 +242,30 @@ export async function GET(request: NextRequest) {
         await statsCache.save();
         logger.info(`✓ Successfully saved statistics to ${storageInfo.backend.toUpperCase()}`);
       } else {
-        // Log diagnostic info about why all jobs are duplicates
+        // No new jobs → no save, no aggregate recompute, no response payload
+        // rebuild. Cron tick exits with a minimal "no-op" body. This is the
+        // dominant case after url-index has warmed up; cutting the work here
+        // is the single biggest CPU win per tick.
         const urlIndexSize = statsCache.getUrlIndexSize?.() || 'unknown';
-        logger.info(`No new jobs to save (all ${processedCount} jobs already exist)`);
-        logger.info(`  → URL index contains ${urlIndexSize} URLs. All ${processedCount} incoming RSS URLs matched the index.`);
-        logger.info(`  → This means the RSS feed has no NEW job postings since last extraction.`);
-        logger.info(`  → If this seems wrong, run POST /api/stats/rebuild to regenerate the URL index.`);
+        logger.info(`No new jobs to save (all ${processedCount} jobs already exist, ${skippedKnown} skipped via dedup-first)`);
+        logger.info(`  → URL index contains ${urlIndexSize} URLs. All incoming RSS URLs matched the index.`);
+
+        const summary = statsCache.getSummary();
+        const stats = statsCache.getStats();
+        return NextResponse.json({
+          success: true,
+          message: `Processed ${processedCount} jobs, added 0 new jobs (short-circuit)`,
+          processed: processedCount,
+          newJobs: 0,
+          skippedKnown,
+          summary: {
+            totalJobsAllTime: stats.totalJobsAllTime,
+            currentMonth: summary.currentMonth,
+            currentMonthJobs: stats.currentMonthJobs,
+            availableArchives: summary.availableArchives,
+            storageBackend: storageInfo.backend,
+          },
+        });
       }
     }
 

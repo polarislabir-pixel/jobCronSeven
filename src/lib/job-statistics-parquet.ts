@@ -18,7 +18,6 @@
  */
 
 import { createHash } from 'crypto';
-import { parquetWriteBuffer } from 'hyparquet-writer';
 import { logger } from './logger';
 import {
   getR2Storage,
@@ -27,6 +26,18 @@ import {
   type ParquetFileRef,
 } from './r2-storage';
 import type { JobStatistic, MonthlyStatistics } from './job-statistics-r2';
+
+// Lazy handle for the Parquet writer. Imported on first encode so cron ticks
+// that don't actually write Parquet (no-op ticks after dedup-first) don't
+// pay the module-load cost on cold starts.
+let _parquetWriteBuffer: ((options: unknown) => ArrayBuffer) | null = null;
+async function getParquetWriteBuffer() {
+  if (!_parquetWriteBuffer) {
+    const mod = await import('hyparquet-writer');
+    _parquetWriteBuffer = mod.parquetWriteBuffer as unknown as typeof _parquetWriteBuffer;
+  }
+  return _parquetWriteBuffer!;
+}
 
 const PARQUET_MANIFEST_VERSION = 1;
 const AGGREGATE_VERSION = 1;
@@ -55,8 +66,9 @@ function nullableString(value: string | null | undefined): string | null {
  * Encode an array of JobStatistic rows as a single Parquet file.
  *
  * Returns the raw bytes. Caller persists them to R2 and updates the manifest.
+ * Async because hyparquet-writer is lazy-imported on first use.
  */
-export function encodeJobsAsParquet(jobs: JobStatistic[]): Uint8Array {
+export async function encodeJobsAsParquet(jobs: JobStatistic[]): Promise<Uint8Array> {
   const columns: ParquetColumn[] = [
     { name: 'id',                data: jobs.map(j => j.id ?? ''),                                    type: 'STRING' },
     { name: 'title',             data: jobs.map(j => j.title ?? ''),                                 type: 'STRING' },
@@ -87,7 +99,8 @@ export function encodeJobsAsParquet(jobs: JobStatistic[]): Uint8Array {
 
   // hyparquet-writer returns either ArrayBuffer or Uint8Array depending on version.
   // Normalize to Uint8Array regardless.
-  const raw = (parquetWriteBuffer as any)({ columnData: columns });
+  const writer = await getParquetWriteBuffer();
+  const raw = writer({ columnData: columns });
   const bytes = raw instanceof Uint8Array
     ? raw
     : new Uint8Array(raw as ArrayBuffer);
@@ -135,7 +148,7 @@ export async function writeDailyParquet(
 ): Promise<WriteDailyParquetResult> {
   const r2 = getR2Storage();
 
-  const bytes = encodeJobsAsParquet(jobs);
+  const bytes = await encodeJobsAsParquet(jobs);
   const contentHash = createHash('sha256').update(bytes).digest('hex');
   const shortHash = contentHash.slice(0, 8);
   const key = dailyParquetKey(date, shortHash);
@@ -180,7 +193,7 @@ export async function compactMonthlyParquet(
 ): Promise<{ ref: ParquetFileRef; deletedKeys: string[] }> {
   const r2 = getR2Storage();
 
-  const bytes = encodeJobsAsParquet(jobs);
+  const bytes = await encodeJobsAsParquet(jobs);
   const contentHash = createHash('sha256').update(bytes).digest('hex');
   const shortHash = contentHash.slice(0, 8);
   const key = monthlyParquetKey(month, shortHash);

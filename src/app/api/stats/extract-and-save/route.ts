@@ -57,12 +57,21 @@ export async function GET(request: NextRequest) {
     // Process each job and extract metadata
     let processedCount = 0;
     let newJobsCount = 0;
+    let skippedKnown = 0;
 
     for (const rssJob of allJobs) {
       try {
         // Skip if URL is invalid
         if (!rssJob.link || !rssJob.link.includes('http')) {
           logger.warn(`Skipping job with invalid URL: ${rssJob.title}`);
+          continue;
+        }
+
+        // Dedup-first: skip the heavy extractor pipeline for already-known URLs.
+        // addJob would reject them anyway; this just saves the wasted CPU.
+        if (statsCache.isKnownUrl?.(rssJob.link)) {
+          skippedKnown++;
+          processedCount++;
           continue;
         }
 

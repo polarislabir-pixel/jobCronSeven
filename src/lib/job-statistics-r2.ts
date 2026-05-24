@@ -1199,6 +1199,23 @@ export class JobStatisticsCacheR2 {
   }
 
   /**
+   * Cheap lookup against the in-memory URL index for "is this job already
+   * stored?" — without running addJob's full path.
+   *
+   * Lets callers (the cron route) short-circuit the heavy metadata/salary/
+   * location/role-type extractor pipeline for jobs we're about to reject as
+   * duplicates anyway. The 95%+ of RSS items that are duplicates on every
+   * tick become free this way.
+   *
+   * Returns false if the cache hasn't loaded yet — callers will then run
+   * the full path and `addJob` will catch any duplicates that slip through.
+   */
+  isKnownUrl(url: string): boolean {
+    if (!this.loaded) return false;
+    return this.urlIndex.has(normalizeUrl(url));
+  }
+
+  /**
    * Get current month statistics
    */
   getCurrentStatistics(): MonthlyStatistics {
