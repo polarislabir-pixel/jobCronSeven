@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getR2Storage } from "@/lib/r2-storage";
-import { JobMetadata } from "@/lib/job-statistics-r2";
+import {
+  JobMetadata,
+  MonthlyStatistics,
+  getJobStatisticsCacheR2,
+} from "@/lib/job-statistics-r2";
+import { writeAggregateJson } from "@/lib/job-statistics-parquet";
+import { normalizeCity } from "@/lib/location-extractor";
 import { logger } from "@/lib/logger";
 
 /**
@@ -8,6 +14,55 @@ import { logger } from "@/lib/logger";
  */
 function normalizeUrl(url: string): string {
   return url.toLowerCase().trim();
+}
+
+/** Numeric midpoint of a salary range, 0 if neither end is known. */
+function salaryMidpoint(salary: { min: number | null; max: number | null }): number {
+  if (salary.min !== null && salary.max !== null) return (salary.min + salary.max) / 2;
+  return salary.min ?? salary.max ?? 0;
+}
+
+type SalaryStats = NonNullable<MonthlyStatistics["salaryStats"]>;
+type SalaryRangeKey = keyof SalaryStats["salaryRanges"];
+
+/** Bucket label for the 6 salary-range histogram entries. */
+function salaryBucket(midpoint: number): SalaryRangeKey {
+  if (midpoint < 30_000) return '0-30k';
+  if (midpoint < 50_000) return '30-50k';
+  if (midpoint < 75_000) return '50-75k';
+  if (midpoint < 100_000) return '75-100k';
+  if (midpoint < 150_000) return '100-150k';
+  return '150k+';
+}
+
+function emptySalaryStats(): SalaryStats {
+  return {
+    totalWithSalary: 0,
+    averageSalary: null,
+    medianSalary: null,
+    byIndustry: {},
+    bySeniority: {},
+    byLocation: {},
+    byCountry: {},
+    byCity: {},
+    byCurrency: {},
+    salaryRanges: {
+      '0-30k': 0,
+      '30-50k': 0,
+      '50-75k': 0,
+      '75-100k': 0,
+      '100-150k': 0,
+      '150k+': 0,
+    },
+  };
+}
+
+/** Median of a sorted numeric array. */
+function median(sorted: number[]): number {
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+    : Math.round(sorted[mid]);
 }
 
 export const maxDuration = 300; // 5 minutes timeout
@@ -89,50 +144,65 @@ export async function POST(request: NextRequest) {
 
     logger.info(`✓ Saved URL index with ${urlIndex.length} URLs`);
 
-    // Recalculate statistics for each month
-    const statsByMonth = new Map<string, {
-      totalJobs: number;
-      byDate: Record<string, number>;
-      byIndustry: Record<string, number>;
-      byCertificate: Record<string, number>;
-      byKeyword: Record<string, number>;
-      bySeniority: Record<string, number>;
-      byLocation: Record<string, number>;
-      byCountry: Record<string, number>;
-      byCity: Record<string, number>;
-      byRegion: Record<string, number>;
-      byCompany: Record<string, number>;
-      bySoftware: Record<string, number>;
-      byProgrammingSkill: Record<string, number>;
-      byYearsExperience: Record<string, number>;
-      byAcademicDegree: Record<string, number>;
+    // Recalculate statistics for each month, preserving every field the
+    // dashboard reads (salaryStats, byRoleType/Category, byHour/DayHour).
+    // The previous version of this route silently dropped those, so running
+    // it wiped the salary widgets, role chips, and posting heatmap.
+    const statsByMonth = new Map<string, MonthlyStatistics>();
+
+    // Per-month buckets of raw salary midpoints, kept separately so we can
+    // compute median + per-group avg/median once at the end. The flat
+    // updateSalaryStats path doesn't keep medians (it can't — needs full set),
+    // so a rebuild is the only opportunity to recompute them correctly.
+    const salaryBuckets = new Map<string, {
+      all: number[];
+      byIndustry: Record<string, number[]>;
+      bySeniority: Record<string, number[]>;
+      byLocation: Record<string, number[]>;
+      byCountry: Record<string, number[]>;
+      byCity: Record<string, number[]>;
     }>();
 
-    // Initialize stats for all months
+    const emptyStats = (): MonthlyStatistics => ({
+      totalJobs: 0,
+      byDate: {},
+      byIndustry: {},
+      byCertificate: {},
+      byKeyword: {},
+      bySeniority: {},
+      byLocation: {},
+      byCountry: {},
+      byCity: {},
+      byRegion: {},
+      byCompany: {},
+      bySoftware: {},
+      byProgrammingSkill: {},
+      byYearsExperience: {},
+      byAcademicDegree: {},
+      byRoleType: {},
+      byRoleCategory: {},
+      byHour: {},
+      byDayHour: {},
+      salaryStats: emptySalaryStats(),
+    });
+
     for (const month of manifest.availableMonths) {
-      statsByMonth.set(month, {
-        totalJobs: 0,
-        byDate: {},
+      statsByMonth.set(month, emptyStats());
+      salaryBuckets.set(month, {
+        all: [],
         byIndustry: {},
-        byCertificate: {},
-        byKeyword: {},
         bySeniority: {},
         byLocation: {},
         byCountry: {},
         byCity: {},
-        byRegion: {},
-        byCompany: {},
-        bySoftware: {},
-        byProgrammingSkill: {},
-        byYearsExperience: {},
-        byAcademicDegree: {},
       });
     }
 
     // Calculate stats from unique jobs
     for (const { metadata, month } of allJobsByUrl.values()) {
       const stats = statsByMonth.get(month);
-      if (!stats) continue;
+      const salaries = salaryBuckets.get(month);
+      if (!stats || !salaries) continue;
 
       stats.totalJobs++;
 
@@ -163,8 +233,11 @@ export async function POST(request: NextRequest) {
         stats.byCountry[metadata.country] = (stats.byCountry[metadata.country] || 0) + 1;
       }
 
-      if (metadata.city) {
-        stats.byCity[metadata.city] = (stats.byCity[metadata.city] || 0) + 1;
+      // Match what JobStatisticsCacheR2.updateStatistics does — normalize
+      // city names so "Greater London Area" and "London" collapse together.
+      const normalizedCityName = normalizeCity(metadata.city);
+      if (normalizedCityName) {
+        stats.byCity[normalizedCityName] = (stats.byCity[normalizedCityName] || 0) + 1;
       }
 
       if (metadata.region) {
@@ -190,6 +263,81 @@ export async function POST(request: NextRequest) {
       metadata.academicDegrees?.forEach(degree => {
         stats.byAcademicDegree[degree] = (stats.byAcademicDegree[degree] || 0) + 1;
       });
+
+      // Role categorization (dashboard chips + treemap).
+      if (metadata.roleType) {
+        stats.byRoleType![metadata.roleType] = (stats.byRoleType![metadata.roleType] || 0) + 1;
+      }
+      if (metadata.roleCategory) {
+        stats.byRoleCategory![metadata.roleCategory] = (stats.byRoleCategory![metadata.roleCategory] || 0) + 1;
+      }
+
+      // Publication-time data (heatmap + hour-of-day bar). Uses postedDate
+      // in UTC, matching JobStatisticsCacheR2.updateStatistics.
+      if (metadata.postedDate) {
+        const posted = new Date(metadata.postedDate);
+        if (!Number.isNaN(posted.getTime())) {
+          const hour = posted.getUTCHours();
+          const hourKey = String(hour).padStart(2, '0');
+          stats.byHour![hourKey] = (stats.byHour![hourKey] || 0) + 1;
+          const dayHourKey = `${posted.getUTCDay()}-${hour}`;
+          stats.byDayHour![dayHourKey] = (stats.byDayHour![dayHourKey] || 0) + 1;
+        }
+      }
+
+      // Salary — collect raw midpoints per group for median computation at
+      // the end. Also increment the flat range/currency counters now.
+      if (metadata.salary) {
+        const midpoint = salaryMidpoint(metadata.salary);
+        if (midpoint > 0) {
+          stats.salaryStats!.totalWithSalary++;
+          stats.salaryStats!.byCurrency[metadata.salary.currency] =
+            (stats.salaryStats!.byCurrency[metadata.salary.currency] || 0) + 1;
+          stats.salaryStats!.salaryRanges[salaryBucket(midpoint)]++;
+
+          salaries.all.push(midpoint);
+          if (metadata.industry) (salaries.byIndustry[metadata.industry] ||= []).push(midpoint);
+          if (metadata.seniority) (salaries.bySeniority[metadata.seniority] ||= []).push(midpoint);
+          if (metadata.location) (salaries.byLocation[metadata.location] ||= []).push(midpoint);
+          if (metadata.country) (salaries.byCountry[metadata.country] ||= []).push(midpoint);
+          if (normalizedCityName) (salaries.byCity[normalizedCityName] ||= []).push(midpoint);
+        }
+      }
+    }
+
+    // Finalize salary stats — compute averageSalary, medianSalary, and the
+    // per-group {avg, median, count} entries from the raw midpoint buckets.
+    for (const [month, stats] of statsByMonth.entries()) {
+      const buckets = salaryBuckets.get(month);
+      if (!buckets || buckets.all.length === 0) continue;
+
+      const sortedAll = [...buckets.all].sort((a, b) => a - b);
+      stats.salaryStats!.averageSalary = Math.round(
+        sortedAll.reduce((s, v) => s + v, 0) / sortedAll.length,
+      );
+      stats.salaryStats!.medianSalary = median(sortedAll);
+
+      const summarize = (groups: Record<string, number[]>) =>
+        Object.entries(groups).reduce<Record<string, { avg: number; median: number; count: number }>>(
+          (acc, [key, vals]) => {
+            if (vals.length > 0) {
+              const sorted = [...vals].sort((a, b) => a - b);
+              acc[key] = {
+                avg: Math.round(vals.reduce((s, v) => s + v, 0) / vals.length),
+                median: median(sorted),
+                count: vals.length,
+              };
+            }
+            return acc;
+          },
+          {},
+        );
+
+      stats.salaryStats!.byIndustry = summarize(buckets.byIndustry);
+      stats.salaryStats!.bySeniority = summarize(buckets.bySeniority);
+      stats.salaryStats!.byLocation = summarize(buckets.byLocation);
+      stats.salaryStats!.byCountry = summarize(buckets.byCountry);
+      stats.salaryStats!.byCity = summarize(buckets.byCity);
     }
 
     // Save updated stats for each month
@@ -209,6 +357,37 @@ export async function POST(request: NextRequest) {
     manifest.totalJobsAllTime = totalJobsAllTime;
     await r2.saveManifest(manifest);
 
+    // Refresh the two derived files. Without this step, the dashboard's
+    // diagnostic widget keeps flagging a mismatch — the per-month stats files
+    // were just corrected, but aggregated-stats.json and stats/aggregate.json
+    // still hold the stale (pre-rebuild) totals until the next cron save().
+    //
+    // The legacy aggregated-stats.json is deleted so the next read forces a
+    // recompute. stats/aggregate.json is written here directly with the
+    // freshly-rebuilt data so the dashboard converges on next reload.
+    let aggregateRefreshed = false;
+    try {
+      await r2.delete('aggregated-stats.json').catch(() => {});
+
+      const cache = getJobStatisticsCacheR2();
+      await cache.load(); // re-reads the rebuilt manifest + stats files
+      const aggResult = await cache.getAllArchivesAggregated();
+
+      const refreshedManifest = cache.getManifest();
+      if (refreshedManifest) {
+        await writeAggregateJson({
+          manifest: refreshedManifest,
+          currentMonthStats: cache.getCurrentStatistics(),
+          archives: aggResult.archives,
+          aggregatedStats: aggResult.aggregated,
+          totalJobs: aggResult.totalJobs,
+        });
+        aggregateRefreshed = true;
+      }
+    } catch (err) {
+      logger.error("Rebuild: aggregate refresh step failed (per-month stats still saved):", err);
+    }
+
     logger.info("=== Rebuild Complete ===");
 
     return NextResponse.json({
@@ -221,6 +400,7 @@ export async function POST(request: NextRequest) {
         urlIndexSize: urlIndex.length,
         totalJobsAllTime,
         monthsProcessed: manifest.availableMonths.length,
+        aggregateRefreshed,
       },
     });
   } catch (error) {
