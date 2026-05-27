@@ -4,10 +4,10 @@ import { verifyCronRequest, ValidationError } from "@/lib/validation";
 import { logger } from "@/lib/logger";
 import {
   RSS_ARYAN_FEED_URLS,
-  ARYAN_TELEGRAM_BOT_TOKEN,
-  ARYAN_TELEGRAM_CHAT_ID,
-  GOAT_ARYAN_TELEGRAM_BOT_TOKEN,
-  GOAT_ARYAN_TELEGRAM_CHAT_ID,
+  TELEGRAM_ARYAN_BOT_TOKEN,
+  TELEGRAM_ARYAN_CHAT_ID,
+  GOAT_TELEGRAM_ARYAN_BOT_TOKEN,
+  GOAT_TELEGRAM_ARYAN_CHAT_ID,
 } from "@/config/constants";
 
 /**
@@ -24,11 +24,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    if (!ARYAN_TELEGRAM_BOT_TOKEN) {
-      throw new ValidationError("ARYAN_TELEGRAM_BOT_TOKEN is not set");
+    if (!TELEGRAM_ARYAN_BOT_TOKEN) {
+      throw new ValidationError("TELEGRAM_ARYAN_BOT_TOKEN is not set");
     }
-    if (!ARYAN_TELEGRAM_CHAT_ID) {
-      throw new ValidationError("ARYAN_TELEGRAM_CHAT_ID is not set");
+    if (!TELEGRAM_ARYAN_CHAT_ID) {
+      throw new ValidationError("TELEGRAM_ARYAN_CHAT_ID is not set");
     }
     if (RSS_ARYAN_FEED_URLS.length === 0) {
       throw new ValidationError("RSS_ARYAN_FEED_URLS is not set or empty");
@@ -36,10 +36,10 @@ export async function GET(request: NextRequest) {
 
     const config: JobMonitorConfig = {
       feedUrls: RSS_ARYAN_FEED_URLS,
-      mainBotToken: ARYAN_TELEGRAM_BOT_TOKEN,
-      mainChatId: ARYAN_TELEGRAM_CHAT_ID,
-      goatBotToken: GOAT_ARYAN_TELEGRAM_BOT_TOKEN,
-      goatChatId: GOAT_ARYAN_TELEGRAM_CHAT_ID,
+      mainBotToken: TELEGRAM_ARYAN_BOT_TOKEN,
+      mainChatId: TELEGRAM_ARYAN_CHAT_ID,
+      goatBotToken: GOAT_TELEGRAM_ARYAN_BOT_TOKEN,
+      goatChatId: GOAT_TELEGRAM_ARYAN_CHAT_ID,
       cacheKey: "url-rss-aryan",
       label: "aryan",
       appliedNamespace: "aryan",

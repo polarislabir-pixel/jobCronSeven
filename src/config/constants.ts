@@ -25,11 +25,11 @@ export const RSS_ARYAN_FEED_URLS = process.env.RSS_ARYAN_FEED_URLS
   ? process.env.RSS_ARYAN_FEED_URLS.split(',').map(url => url.trim()).filter(Boolean)
   : [];
 
-export const ARYAN_TELEGRAM_BOT_TOKEN = process.env.ARYAN_TELEGRAM_BOT_TOKEN;
-export const ARYAN_TELEGRAM_CHAT_ID = process.env.ARYAN_TELEGRAM_CHAT_ID;
+export const TELEGRAM_ARYAN_BOT_TOKEN = process.env.TELEGRAM_ARYAN_BOT_TOKEN;
+export const TELEGRAM_ARYAN_CHAT_ID = process.env.TELEGRAM_ARYAN_CHAT_ID;
 
-export const GOAT_ARYAN_TELEGRAM_BOT_TOKEN = process.env.GOAT_ARYAN_TELEGRAM_BOT_TOKEN;
-export const GOAT_ARYAN_TELEGRAM_CHAT_ID = process.env.GOAT_ARYAN_TELEGRAM_CHAT_ID;
+export const GOAT_TELEGRAM_ARYAN_BOT_TOKEN = process.env.GOAT_TELEGRAM_ARYAN_BOT_TOKEN;
+export const GOAT_TELEGRAM_ARYAN_CHAT_ID = process.env.GOAT_TELEGRAM_ARYAN_CHAT_ID;
 
 export const RATE_LIMIT_DELAY_MS = 2000; // Delay between Telegram messages
 
