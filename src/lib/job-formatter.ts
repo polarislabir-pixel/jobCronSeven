@@ -1,6 +1,7 @@
 import { JobItem } from "@/types/job";
 import { extractJobDetails, analyzeJobDescription } from "./job-analyzer";
 import { createTrackingUrl } from "./tracking-url";
+import type { AppliedNamespace } from "./applied-jobs-r2";
 import { JobMetadataExtractor } from "./job-metadata-extractor";
 import { LocationExtractor } from "./location-extractor";
 import { RoleTypeExtractor } from "./role-type-extractor";
@@ -62,9 +63,13 @@ function formatDate(date: Date): string {
 }
 
 /**
- * Formats a job item as a Telegram message
+ * Formats a job item as a Telegram message.
+ * `options.namespace` controls which applied-jobs store the tracking link writes into.
  */
-export function formatJobMessage(job: JobItem): string {
+export function formatJobMessage(
+  job: JobItem,
+  options: { namespace?: AppliedNamespace } = {},
+): string {
   const details = extractJobDetails(job.title);
   const postDate = new Date(job.pubDate);
   const timeAgo = getTimeAgo(postDate);
@@ -189,16 +194,19 @@ export function formatJobMessage(job: JobItem): string {
     jobUrl = jobUrl.replace(/amp;/g, '');
   }
 
-  // Generate tracking URL with job metadata
-  const trackingUrl = createTrackingUrl({
-    jobUrl,
-    title: details.position,
-    company: details.company,
-    location: locationDisplay,
-    postedDate: job.pubDate,
-    roleType: roleTypeMatch?.roleType ?? undefined,
-    industry: metadata.industry !== 'Other' ? metadata.industry : undefined,
-  });
+  // Generate tracking URL with job metadata (namespaced per pipeline)
+  const trackingUrl = createTrackingUrl(
+    {
+      jobUrl,
+      title: details.position,
+      company: details.company,
+      location: locationDisplay,
+      postedDate: job.pubDate,
+      roleType: roleTypeMatch?.roleType ?? undefined,
+      industry: metadata.industry !== 'Other' ? metadata.industry : undefined,
+    },
+    { namespace: options.namespace },
+  );
 
   sections.push(
     "",

@@ -20,6 +20,17 @@ export const CRON_SECRET = process.env.CRON_SECRET;
 export const GOAT_TELEGRAM_BOT_TOKEN = process.env.GOAT_TELEGRAM_BOT_TOKEN;
 export const GOAT_TELEGRAM_CHAT_ID = process.env.GOAT_TELEGRAM_CHAT_ID;
 
+// Aryan pipeline — separate feeds + bots, same filtering as main
+export const RSS_ARYAN_FEED_URLS = process.env.RSS_ARYAN_FEED_URLS
+  ? process.env.RSS_ARYAN_FEED_URLS.split(',').map(url => url.trim()).filter(Boolean)
+  : [];
+
+export const ARYAN_TELEGRAM_BOT_TOKEN = process.env.ARYAN_TELEGRAM_BOT_TOKEN;
+export const ARYAN_TELEGRAM_CHAT_ID = process.env.ARYAN_TELEGRAM_CHAT_ID;
+
+export const GOAT_ARYAN_TELEGRAM_BOT_TOKEN = process.env.GOAT_ARYAN_TELEGRAM_BOT_TOKEN;
+export const GOAT_ARYAN_TELEGRAM_CHAT_ID = process.env.GOAT_ARYAN_TELEGRAM_CHAT_ID;
+
 export const RATE_LIMIT_DELAY_MS = 2000; // Delay between Telegram messages
 
 // Tracking configuration

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateTrackingUrl, decodeJobData } from '@/lib/tracking-url';
-import { getAppliedJobsStorage } from '@/lib/applied-jobs-r2';
+import { getAppliedJobsStorage, isAppliedNamespace, type AppliedNamespace } from '@/lib/applied-jobs-r2';
 import { logger } from '@/lib/logger';
 
 /**
@@ -45,6 +45,7 @@ export async function GET(request: NextRequest) {
   const timestamp = searchParams.get('t');
   const signature = searchParams.get('s');
   const encodedData = searchParams.get('d');
+  const nsParam = searchParams.get('n');
 
   // Validate required parameters
   if (!jobId || !timestamp || !signature || !encodedData) {
@@ -55,8 +56,21 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  // Resolve namespace (default if absent). Reject unknown values.
+  let namespace: AppliedNamespace = 'default';
+  if (nsParam !== null) {
+    if (!isAppliedNamespace(nsParam)) {
+      logger.warn(`Track: Unknown namespace "${nsParam}"`);
+      return NextResponse.json(
+        { error: 'Invalid tracking URL - unknown namespace' },
+        { status: 400 }
+      );
+    }
+    namespace = nsParam;
+  }
+
   // Validate signature
-  const validation = validateTrackingUrl(jobId, timestamp, signature);
+  const validation = validateTrackingUrl(jobId, timestamp, signature, namespace);
   if (!validation.valid) {
     logger.warn(`Track: Invalid signature - ${validation.error}`);
     return NextResponse.json(
@@ -84,7 +98,7 @@ export async function GET(request: NextRequest) {
 
   try {
     // Store the application (only for real user clicks)
-    const storage = getAppliedJobsStorage();
+    const storage = getAppliedJobsStorage(namespace);
     await storage.load();
 
     const application = await storage.addApplication(jobData);
@@ -92,9 +106,9 @@ export async function GET(request: NextRequest) {
     if (application) {
       // Save to R2
       await storage.save();
-      logger.info(`Track: Logged application for "${jobData.title}" at "${jobData.company}"`);
+      logger.info(`Track [${namespace}]: Logged application for "${jobData.title}" at "${jobData.company}"`);
     } else {
-      logger.info(`Track: Already applied to "${jobData.title}" (duplicate click)`);
+      logger.info(`Track [${namespace}]: Already applied to "${jobData.title}" (duplicate click)`);
     }
   } catch (error) {
     // Log error but don't block the redirect

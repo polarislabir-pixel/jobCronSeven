@@ -84,6 +84,19 @@
   cursor: not-allowed;
 }
 
+.terminal-btn.active {
+  background: var(--terminal-accent);
+  color: var(--terminal-bg-header);
+}
+
+.terminal-btn-group .terminal-btn {
+  border-radius: 0;
+}
+
+.terminal-btn-group .terminal-btn + .terminal-btn {
+  border-left: none;
+}
+
 /* Status Bar */
 .terminal-statusbar {
   display: flex;

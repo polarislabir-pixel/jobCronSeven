@@ -1,15 +1,20 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getR2Storage } from '@/lib/r2-storage';
 import { logger } from '@/lib/logger';
 import { AppliedJob, AppliedJobsManifest } from '@/types/applied-job';
 import { LocationExtractor, normalizeCity } from '@/lib/location-extractor';
+import { isAppliedNamespace, getAppliedPrefix } from '@/lib/applied-jobs-r2';
 
 /**
  * Re-normalize location data for all existing applied jobs in R2
  *
- * POST /api/applied/normalize
+ * POST /api/applied/normalize?namespace=default|aryan
  */
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const nsParam = request.nextUrl.searchParams.get('namespace');
+  const namespace = isAppliedNamespace(nsParam) ? nsParam : 'default';
+  const prefix = getAppliedPrefix(namespace);
+
   try {
     const r2 = getR2Storage();
 
@@ -21,7 +26,7 @@ export async function POST() {
     }
 
     // Load manifest
-    const manifest = await r2.getJSON<AppliedJobsManifest>('applied/manifest.json');
+    const manifest = await r2.getJSON<AppliedJobsManifest>(`${prefix}/manifest.json`);
 
     if (!manifest || Object.keys(manifest.applicationsByMonth).length === 0) {
       return NextResponse.json({
@@ -36,7 +41,7 @@ export async function POST() {
 
     // Process each month's data
     for (const month of Object.keys(manifest.applicationsByMonth)) {
-      const key = `applied/${month}.ndjson.gz`;
+      const key = `${prefix}/${month}.ndjson.gz`;
 
       try {
         const applications = await r2.getNDJSONGzipped<AppliedJob>(key);
@@ -67,16 +72,17 @@ export async function POST() {
         totalUpdated += updatedApps.length;
         updatedMonths.push(month);
 
-        logger.info(`Normalized ${updatedApps.length} applications for ${month}`);
+        logger.info(`Normalized ${updatedApps.length} applications for ${month} [${namespace}]`);
       } catch (error) {
         logger.warn(`Failed to process ${month}:`, error);
       }
     }
 
-    logger.info(`Location normalization complete: ${totalUpdated} applications updated`);
+    logger.info(`Location normalization complete [${namespace}]: ${totalUpdated} applications updated`);
 
     return NextResponse.json({
       success: true,
+      namespace,
       message: `Normalized ${totalUpdated} applications`,
       updatedMonths,
       totalUpdated,

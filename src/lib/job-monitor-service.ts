@@ -1,17 +1,42 @@
 import { CronJobResult, JobItem } from "@/types/job";
 import { parseRSSFeeds, filterRecentJobs } from "./rss-parser";
 import { formatJobMessage } from "./job-formatter";
-import { sendMessagesWithRateLimit, sendMessagesWithRateLimitTo } from "./telegram";
+import { sendMessagesWithRateLimitTo } from "./telegram";
 import { logger } from "./logger";
 import { dailyJobCache } from "./daily-cache";
 import { UrlCache } from "./url-cache";
+import type { AppliedNamespace } from "./applied-jobs-r2";
 import {
   RSS_FEED_URLS,
   CHECK_INTERVAL_MINUTES,
   RATE_LIMIT_DELAY_MS,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_CHAT_ID,
   GOAT_TELEGRAM_BOT_TOKEN,
   GOAT_TELEGRAM_CHAT_ID,
 } from "@/config/constants";
+
+export interface JobMonitorConfig {
+  feedUrls: string[];
+  mainBotToken: string | undefined;
+  mainChatId: string | undefined;
+  goatBotToken: string | undefined;
+  goatChatId: string | undefined;
+  cacheKey: string;
+  label: string;
+  appliedNamespace: AppliedNamespace;
+}
+
+const DEFAULT_CONFIG: JobMonitorConfig = {
+  feedUrls: RSS_FEED_URLS,
+  mainBotToken: TELEGRAM_BOT_TOKEN,
+  mainChatId: TELEGRAM_CHAT_ID,
+  goatBotToken: GOAT_TELEGRAM_BOT_TOKEN,
+  goatChatId: GOAT_TELEGRAM_CHAT_ID,
+  cacheKey: "url-rss",
+  label: "main",
+  appliedNamespace: "default",
+};
 import { LocationExtractor } from "./location-extractor";
 import { JobMetadataExtractor } from "./job-metadata-extractor";
 import { RoleTypeExtractor } from "./role-type-extractor";
@@ -251,8 +276,16 @@ function deduplicateJobs(jobs: JobItem[]): JobItem[] {
 /**
  * Main service for checking RSS feeds and sending job notifications
  */
-export async function checkAndSendJobs(): Promise<CronJobResult> {
-  logger.info("Starting job check...");
+export async function checkAndSendJobs(
+  config: JobMonitorConfig = DEFAULT_CONFIG,
+): Promise<CronJobResult> {
+  logger.info(`Starting job check [${config.label}]...`);
+
+  if (!config.mainBotToken || !config.mainChatId) {
+    throw new Error(
+      `[${config.label}] main Telegram bot token / chat id not configured`,
+    );
+  }
 
   try {
     // Log cache stats at the start
@@ -262,9 +295,9 @@ export async function checkAndSendJobs(): Promise<CronJobResult> {
     );
 
     // Parse all RSS feeds
-    const allJobs = await parseRSSFeeds(RSS_FEED_URLS);
+    const allJobs = await parseRSSFeeds(config.feedUrls);
     logger.info(
-      `Fetched ${allJobs.length} total jobs from ${RSS_FEED_URLS.length} feeds`,
+      `Fetched ${allJobs.length} total jobs from ${config.feedUrls.length} feeds`,
     );
 
     // Extract all publication dates from found jobs
@@ -295,7 +328,7 @@ export async function checkAndSendJobs(): Promise<CronJobResult> {
     );
 
     // Load persistent cache and filter out already cached jobs
-    const urlCache = new UrlCache("url-rss");
+    const urlCache = new UrlCache(config.cacheKey);
     await urlCache.load();
 
     logger.info(`\n=== Cache Check Before Sending to Telegram ===`);
@@ -330,13 +363,15 @@ export async function checkAndSendJobs(): Promise<CronJobResult> {
 
     // Format messages and pre-compute GOAT eligibility for each job
     const jobMessages = newJobs.map((job) => ({
-      message: formatJobMessage(job),
+      message: formatJobMessage(job, { namespace: config.appliedNamespace }),
       isGoat: isGoatEligible(job),
     }));
     const messages = jobMessages.map((jm) => jm.message);
 
     // Send messages with rate limiting to main channel
-    const { sent, failed } = await sendMessagesWithRateLimit(
+    const { sent, failed } = await sendMessagesWithRateLimitTo(
+      config.mainBotToken,
+      config.mainChatId,
       messages,
       RATE_LIMIT_DELAY_MS,
     );
@@ -366,23 +401,23 @@ export async function checkAndSendJobs(): Promise<CronJobResult> {
     }
 
     // GOAT channel: send qualifying jobs from the successfully sent batch
-    if (sent > 0 && GOAT_TELEGRAM_BOT_TOKEN && GOAT_TELEGRAM_CHAT_ID) {
+    if (sent > 0 && config.goatBotToken && config.goatChatId) {
       const goatMessages = jobMessages
         .slice(0, sent)
         .filter((jm) => jm.isGoat)
         .map((jm) => jm.message);
 
       if (goatMessages.length > 0) {
-        logger.info(`Sending ${goatMessages.length} GOAT-eligible jobs to GOAT channel`);
+        logger.info(`[${config.label}] Sending ${goatMessages.length} GOAT-eligible jobs to GOAT channel`);
         const goatResult = await sendMessagesWithRateLimitTo(
-          GOAT_TELEGRAM_BOT_TOKEN,
-          GOAT_TELEGRAM_CHAT_ID,
+          config.goatBotToken,
+          config.goatChatId,
           goatMessages,
           RATE_LIMIT_DELAY_MS,
         );
-        logger.info(`GOAT channel: ${goatResult.sent} sent, ${goatResult.failed} failed`);
+        logger.info(`[${config.label}] GOAT channel: ${goatResult.sent} sent, ${goatResult.failed} failed`);
       } else {
-        logger.info(`No GOAT-eligible jobs in this batch`);
+        logger.info(`[${config.label}] No GOAT-eligible jobs in this batch`);
       }
     }
 

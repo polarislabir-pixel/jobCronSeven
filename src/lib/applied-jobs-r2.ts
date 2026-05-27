@@ -7,14 +7,26 @@ import { LocationExtractor, normalizeCity } from './location-extractor';
 /**
  * Applied Jobs R2 Storage
  *
- * Stores job application tracking data in R2.
+ * Stores job application tracking data in R2, scoped by namespace.
  *
- * File structure:
- * - applied/manifest.json           (index of all applications)
- * - applied/YYYY-MM.ndjson.gz       (monthly application records)
+ * File structure (per namespace):
+ * - <prefix>/manifest.json           (index of all applications)
+ * - <prefix>/YYYY-MM.ndjson.gz       (monthly application records)
+ *
+ * Namespaces:
+ * - "default" → applied/        (main pipeline)
+ * - "aryan"   → applied-aryan/  (aryan pipeline)
  */
 
-const APPLIED_MANIFEST_KEY = 'applied/manifest.json';
+export type AppliedNamespace = 'default' | 'aryan';
+
+export function isAppliedNamespace(value: string | null | undefined): value is AppliedNamespace {
+  return value === 'default' || value === 'aryan';
+}
+
+export function getAppliedPrefix(namespace: AppliedNamespace): string {
+  return namespace === 'aryan' ? 'applied-aryan' : 'applied';
+}
 
 export class AppliedJobsR2Storage {
   private r2 = getR2Storage();
@@ -22,6 +34,15 @@ export class AppliedJobsR2Storage {
   private pendingApplications: AppliedJob[] = [];
   private appliedUrls: Set<string> = new Set();
   private loaded = false;
+  private readonly namespace: AppliedNamespace;
+  private readonly prefix: string;
+  private readonly manifestKey: string;
+
+  constructor(namespace: AppliedNamespace = 'default') {
+    this.namespace = namespace;
+    this.prefix = getAppliedPrefix(namespace);
+    this.manifestKey = `${this.prefix}/manifest.json`;
+  }
 
   /**
    * Check if R2 is available
@@ -45,7 +66,7 @@ export class AppliedJobsR2Storage {
 
     try {
       // Load manifest
-      this.manifest = await this.r2.getJSON<AppliedJobsManifest>(APPLIED_MANIFEST_KEY);
+      this.manifest = await this.r2.getJSON<AppliedJobsManifest>(this.manifestKey);
 
       if (!this.manifest) {
         this.manifest = this.createEmptyManifest();
@@ -55,7 +76,7 @@ export class AppliedJobsR2Storage {
       await this.loadAppliedUrls();
 
       this.loaded = true;
-      logger.info(`Applied jobs manifest loaded: ${this.manifest.totalApplications} total applications`);
+      logger.info(`Applied jobs manifest loaded [${this.namespace}]: ${this.manifest.totalApplications} total applications`);
     } catch (error) {
       logger.error('Failed to load applied jobs manifest:', error);
       this.manifest = this.createEmptyManifest();
@@ -84,7 +105,7 @@ export class AppliedJobsR2Storage {
     for (const month of Object.keys(this.manifest.applicationsByMonth)) {
       try {
         const applications = await this.r2.getNDJSONGzipped<AppliedJob>(
-          `applied/${month}.ndjson.gz`
+          `${this.prefix}/${month}.ndjson.gz`
         );
         for (const app of applications) {
           this.appliedUrls.add(app.originalUrl);
@@ -184,7 +205,7 @@ export class AppliedJobsR2Storage {
 
     // Save each month's data
     for (const [month, applications] of Object.entries(byMonth)) {
-      const key = `applied/${month}.ndjson.gz`;
+      const key = `${this.prefix}/${month}.ndjson.gz`;
 
       // Load existing data for this month
       let existingApps: AppliedJob[] = [];
@@ -213,9 +234,9 @@ export class AppliedJobsR2Storage {
     this.manifest.updatedAt = new Date().toISOString();
 
     // Save manifest
-    await this.r2.putJSON(APPLIED_MANIFEST_KEY, this.manifest, 'public, max-age=60');
+    await this.r2.putJSON(this.manifestKey, this.manifest, 'public, max-age=60');
 
-    logger.info(`Saved ${this.pendingApplications.length} applications to R2`);
+    logger.info(`Saved ${this.pendingApplications.length} applications to R2 [${this.namespace}]`);
 
     // Clear pending
     this.pendingApplications = [];
@@ -255,7 +276,7 @@ export class AppliedJobsR2Storage {
       // Get specific month
       try {
         const apps = await this.r2.getNDJSONGzipped<AppliedJob>(
-          `applied/${month}.ndjson.gz`
+          `${this.prefix}/${month}.ndjson.gz`
         );
         return [...apps, ...this.pendingApplications.filter(
           app => app.appliedAt.startsWith(month)
@@ -275,7 +296,7 @@ export class AppliedJobsR2Storage {
     for (const m of Object.keys(this.manifest.applicationsByMonth)) {
       try {
         const apps = await this.r2.getNDJSONGzipped<AppliedJob>(
-          `applied/${m}.ndjson.gz`
+          `${this.prefix}/${m}.ndjson.gz`
         );
         allApps.push(...apps);
       } catch {
@@ -325,36 +346,38 @@ export class AppliedJobsR2Storage {
       // Delete all monthly files
       for (const month of Object.keys(this.manifest.applicationsByMonth)) {
         try {
-          await this.r2.delete(`applied/${month}.ndjson.gz`);
+          await this.r2.delete(`${this.prefix}/${month}.ndjson.gz`);
           totalDeleted += this.manifest.applicationsByMonth[month];
           deletedMonths.push(month);
-          logger.info(`Deleted applied jobs for ${month}`);
+          logger.info(`Deleted applied jobs for ${month} [${this.namespace}]`);
         } catch (error) {
-          logger.warn(`Failed to delete applied/${month}.ndjson.gz:`, error);
+          logger.warn(`Failed to delete ${this.prefix}/${month}.ndjson.gz:`, error);
         }
       }
 
       // Reset manifest
       this.manifest = this.createEmptyManifest();
-      await this.r2.putJSON(APPLIED_MANIFEST_KEY, this.manifest, 'public, max-age=60');
+      await this.r2.putJSON(this.manifestKey, this.manifest, 'public, max-age=60');
     }
 
     // Clear in-memory state
     this.pendingApplications = [];
     this.appliedUrls.clear();
 
-    logger.info(`Cleared all applied jobs: ${totalDeleted} total from ${deletedMonths.length} months`);
+    logger.info(`Cleared all applied jobs [${this.namespace}]: ${totalDeleted} total from ${deletedMonths.length} months`);
 
     return { deletedMonths, totalDeleted };
   }
 }
 
-// Singleton instance
-let appliedJobsInstance: AppliedJobsR2Storage | null = null;
+// Singleton instances per namespace
+const appliedJobsInstances: Partial<Record<AppliedNamespace, AppliedJobsR2Storage>> = {};
 
-export function getAppliedJobsStorage(): AppliedJobsR2Storage {
-  if (!appliedJobsInstance) {
-    appliedJobsInstance = new AppliedJobsR2Storage();
+export function getAppliedJobsStorage(namespace: AppliedNamespace = 'default'): AppliedJobsR2Storage {
+  let instance = appliedJobsInstances[namespace];
+  if (!instance) {
+    instance = new AppliedJobsR2Storage(namespace);
+    appliedJobsInstances[namespace] = instance;
   }
-  return appliedJobsInstance;
+  return instance;
 }

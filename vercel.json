@@ -8,6 +8,10 @@
       "memory": 1024,
       "maxDuration": 60
     },
+    "app/api/cron/check-jobs-aryan/route.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
     "app/api/stats/load/route.ts": {
       "maxDuration": 300
     },

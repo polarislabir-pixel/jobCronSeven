@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAppliedJobsStorage } from '@/lib/applied-jobs-r2';
+import { getAppliedJobsStorage, isAppliedNamespace } from '@/lib/applied-jobs-r2';
 import { logger } from '@/lib/logger';
 
 /**
@@ -7,13 +7,16 @@ import { logger } from '@/lib/logger';
  *
  * Query params:
  * - month: Optional YYYY-MM to filter by month
+ * - namespace: "default" (main) or "aryan". Defaults to "default".
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const month = searchParams.get('month') || undefined;
+  const nsParam = searchParams.get('namespace');
+  const namespace = isAppliedNamespace(nsParam) ? nsParam : 'default';
 
   try {
-    const storage = getAppliedJobsStorage();
+    const storage = getAppliedJobsStorage(namespace);
     await storage.load();
 
     const [applications, stats] = await Promise.all([
@@ -25,7 +28,7 @@ export async function GET(request: NextRequest) {
       success: true,
       data: applications,
       stats,
-      filter: { month },
+      filter: { month, namespace },
     });
   } catch (error) {
     logger.error('Failed to fetch applied jobs:', error);
