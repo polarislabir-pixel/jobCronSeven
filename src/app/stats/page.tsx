@@ -16,9 +16,6 @@ import {
 } from '@/components/charts';
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { SearchFilterPanel } from "@/components/SearchFilterPanel";
-import { DuckDBEngineStatus } from "@/components/DuckDBEngineStatus";
-import { useAggregate } from "@/lib/hooks/useAggregate";
-import { useDuckDBQuery } from "@/lib/hooks/useDuckDBQuery";
 import "./stats.css";
 
 interface SalaryData {
@@ -134,99 +131,6 @@ interface ExtractResult {
   currentMonthTotal: number;
 }
 
-/**
- * Shape of a row arriving from the Parquet files via DuckDB-WASM.
- *
- * Differs from JobStatistic by:
- *   - list columns are JSON-encoded strings (keywords, certificates, software,
- *     programmingSkills, academicDegrees) — see encodeJobsAsParquet in
- *     src/lib/job-statistics-parquet.ts for the encoding decision
- *   - salary is flattened into salary_min / salary_max / salary_currency /
- *     salary_period instead of a nested struct
- *   - description column is intentionally omitted by the SELECT below so
- *     DuckDB never fetches its bytes (huge perf win — descriptions are
- *     ~80% of the Parquet file size)
- */
-interface ParquetJobRow {
-  id: string;
-  title: string;
-  company: string;
-  location: string | null;
-  country: string | null;
-  city: string | null;
-  region: string | null;
-  url: string;
-  postedDate: string;
-  extractedDate: string;
-  industry: string;
-  seniority: string;
-  roleType: string | null;
-  roleCategory: string | null;
-  yearsExperience: string | null;
-  keywords: string | null;
-  certificates: string | null;
-  software: string | null;
-  programmingSkills: string | null;
-  academicDegrees: string | null;
-  salary_min: number | null;
-  salary_max: number | null;
-  salary_currency: string | null;
-  salary_period: string | null;
-}
-
-function parseJsonStringArray(value: unknown): string[] {
-  if (typeof value !== 'string' || value === '') return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Project a DuckDB row from the Parquet files into the JobStatistic shape
- * the rest of the dashboard expects. Description is left blank — the
- * description-on-hover path still uses the legacy /api/stats/description
- * route, which is fine since it's tiny and only fires on interaction.
- */
-function parquetRowToJobStatistic(row: ParquetJobRow): JobStatistic {
-  const hasSalary = row.salary_min !== null || row.salary_max !== null;
-  return {
-    id: row.id,
-    title: row.title,
-    company: row.company,
-    location: row.location ?? '',
-    country: row.country,
-    city: row.city,
-    region: (row.region ?? null) as JobStatistic['region'],
-    url: row.url,
-    postedDate: row.postedDate,
-    extractedDate: row.extractedDate,
-    keywords: parseJsonStringArray(row.keywords),
-    certificates: parseJsonStringArray(row.certificates),
-    industry: row.industry,
-    seniority: row.seniority,
-    description: '',
-    salary: hasSalary
-      ? {
-          min: row.salary_min,
-          max: row.salary_max,
-          currency: row.salary_currency ?? '',
-          period: (row.salary_period ?? 'unknown') as SalaryData['period'],
-          raw: '',
-          confidence: 'medium',
-        }
-      : undefined,
-    software: parseJsonStringArray(row.software),
-    programmingSkills: parseJsonStringArray(row.programmingSkills),
-    yearsExperience: row.yearsExperience ?? null,
-    academicDegrees: parseJsonStringArray(row.academicDegrees),
-    roleType: row.roleType ?? null,
-    roleCategory: row.roleCategory ?? null,
-  };
-}
-
 interface ActiveFilters {
   industry: string[];
   certificate: string[];
@@ -307,71 +211,33 @@ export default function StatsPage() {
     if (jobsBarRef.current) jobsBarRef.current.style.width = `${loadingProgress}%`;
   }, [loadingProgress]);
 
-  // Phase-3 DuckDB-backed read path. Replaces the legacy
-  //   fetch(`/api/stats/jobs?month=${currentMonth}&all=true`)
-  // which 500s once the dataset crosses ~50K rows (Vercel function memory
-  // and response-size ceilings). DuckDB-WASM range-fetches only the columns
-  // we SELECT from Parquet on R2 — no Vercel function involvement — and we
-  // populate the same loadedJobsById state the rest of the page consumes.
-  //
-  // We also explicitly omit `description` from the projection: descriptions
-  // are ~80% of the Parquet file size, never needed until the user hovers a
-  // job card, and the hover path still uses /api/stats/description (small,
-  // per-date, perfectly fine on the legacy route).
-  const { data: aggregateJson } = useAggregate();
-  const parquetManifest = useMemo(() => aggregateJson?.parquet ?? null, [aggregateJson]);
-  const currentMonthForQuery = statsData?.currentMonth.month ?? null;
-
-  const jobsSql = useMemo(() => {
-    if (!parquetManifest || !currentMonthForQuery) return null;
-    // currentMonthForQuery comes from the server-loaded statsData so is
-    // trusted, but stay defensive against future code paths that might
-    // wire user input through here.
-    const safeMonth = currentMonthForQuery.replace(/[^0-9-]/g, '');
-    return `
-      SELECT
-        id, title, company, location, country, city, region, url,
-        postedDate, extractedDate, industry, seniority,
-        roleType, roleCategory, yearsExperience,
-        keywords, certificates, software, programmingSkills, academicDegrees,
-        salary_min, salary_max, salary_currency, salary_period
-      FROM jobs
-      WHERE substr(extractedDate, 1, 7) = '${safeMonth}'
-    `;
-  }, [parquetManifest, currentMonthForQuery]);
-
-  const { data: parquetJobRows } = useDuckDBQuery<ParquetJobRow>(parquetManifest, jobsSql);
-
-  // Loading-bar progress is driven by statsData arriving (the initial paint
-  // signal), separately from the Parquet job records that hydrate after.
+  // Background metadata load — fires whenever statsData changes (e.g. after LOAD DATA).
+  // Loads the current month's job records directly from R2 via /api/stats/jobs.
   useEffect(() => {
     if (!statsData) return;
     setJobsLoading(true);
     setLoadingStep('LOADING JOB RECORDS...');
     setLoadingProgress(85);
+    const currentMonth = statsData.currentMonth.month;
+    fetch(`/api/stats/jobs?month=${currentMonth}&all=true`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success && Array.isArray(data.jobs)) {
+          const map = new Map<string, JobStatistic>();
+          for (const job of data.jobs) {
+            map.set(job.id, { ...job, description: '' });
+          }
+          setLoadedJobsById(map);
+          setLoadedDates(new Set(data.jobs.map((j: JobStatistic) => j.extractedDate.split('T')[0])));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setJobsLoading(false);
+        setLoadingStep('READY');
+        setLoadingProgress(100);
+      });
   }, [statsData]);
-
-  // Hydrate loadedJobsById + loadedDates from the Parquet query result. The
-  // shape we set matches what the legacy /api/stats/jobs payload produced,
-  // so every downstream consumer (filtering, hover popups, etc.) keeps
-  // working without changes.
-  useEffect(() => {
-    if (!parquetJobRows) return;
-    const map = new Map<string, JobStatistic>();
-    const dates = new Set<string>();
-    for (const row of parquetJobRows) {
-      const job = parquetRowToJobStatistic(row);
-      map.set(job.id, job);
-      if (job.extractedDate) {
-        dates.add(job.extractedDate.split('T')[0]);
-      }
-    }
-    setLoadedJobsById(map);
-    setLoadedDates(dates);
-    setJobsLoading(false);
-    setLoadingStep('READY');
-    setLoadingProgress(100);
-  }, [parquetJobRows]);
 
   const loadStatistics = async () => {
     setLoading(true);
@@ -1319,9 +1185,6 @@ export default function StatsPage() {
               <span>FILTERS ACTIVE</span>
             </div>
           )}
-          <div className="status-item status-item-trailing">
-            <DuckDBEngineStatus />
-          </div>
         </div>
       )}
 

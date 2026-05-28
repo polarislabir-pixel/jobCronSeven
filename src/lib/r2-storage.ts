@@ -54,30 +54,6 @@ export interface Manifest {
   availableMonths: string[];       // sorted, most recent first
   totalJobsAllTime: number;
   schema: string;
-  parquet?: ParquetManifest;       // Parquet file index (added during dual-write phase)
-}
-
-/**
- * Index of Parquet files for DuckDB-WASM consumption.
- * One entry per file; the browser reads these via the R2 public URL.
- */
-export interface ParquetManifest {
-  version: number;
-  updatedAt: string;
-  // Daily files for the current month, keyed by YYYY-MM-DD.
-  // Compacted away once /api/stats/compact rolls a month into a monthly file.
-  daily: Record<string, ParquetFileRef>;
-  // Compacted monthly files for finished months, keyed by YYYY-MM.
-  monthly: Record<string, ParquetFileRef>;
-}
-
-export interface ParquetFileRef {
-  key: string;          // R2 object key
-  url: string;          // Public CDN URL (DuckDB-WASM fetches this)
-  rowCount: number;
-  byteSize: number;
-  contentHash: string;  // sha256 hex of file body — for cache busting
-  updatedAt: string;
 }
 
 export class R2Storage {
@@ -235,58 +211,6 @@ export class R2Storage {
     } catch (error: any) {
       if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
         return [];
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Upload a Parquet file body (raw bytes) with long-cache immutable headers.
-   * The caller is responsible for actually encoding rows to Parquet — this only
-   * handles the R2 round-trip and surfaces the content hash for manifest entries.
-   */
-  async putParquet(key: string, body: Uint8Array): Promise<{ byteSize: number; contentHash: string }> {
-    if (!this.isConfigured) {
-      throw new Error('R2 Storage not configured');
-    }
-
-    const { createHash } = await import('crypto');
-    const contentHash = createHash('sha256').update(body).digest('hex');
-
-    await this.client.send(new PutObjectCommand({
-      Bucket: this.bucketName,
-      Key: key,
-      Body: body,
-      ContentType: 'application/vnd.apache.parquet',
-      // Immutable + long max-age is safe because every write goes to a new
-      // hash-suffixed key (see ParquetFileRef.contentHash + ?v= query).
-      CacheControl: 'public, max-age=31536000, immutable',
-    }));
-
-    logger.info(`✓ Uploaded Parquet: ${key} (${body.length} bytes, hash ${contentHash.slice(0, 8)})`);
-    return { byteSize: body.length, contentHash };
-  }
-
-  /**
-   * Get a Parquet file body as raw bytes (server-side reads — DuckDB-WASM
-   * in the browser fetches via the public URL instead).
-   */
-  async getParquet(key: string): Promise<Uint8Array | null> {
-    if (!this.isConfigured) {
-      throw new Error('R2 Storage not configured');
-    }
-
-    try {
-      const response = await this.client.send(new GetObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-      }));
-
-      const body = await response.Body?.transformToByteArray();
-      return body ?? null;
-    } catch (error: any) {
-      if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
-        return null;
       }
       throw error;
     }

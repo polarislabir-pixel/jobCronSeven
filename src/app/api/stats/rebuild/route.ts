@@ -3,9 +3,7 @@ import { getR2Storage } from "@/lib/r2-storage";
 import {
   JobMetadata,
   MonthlyStatistics,
-  getJobStatisticsCacheR2,
 } from "@/lib/job-statistics-r2";
-import { writeAggregateJson } from "@/lib/job-statistics-parquet";
 import { normalizeCity } from "@/lib/location-extractor";
 import { logger } from "@/lib/logger";
 
@@ -357,35 +355,15 @@ export async function POST(request: NextRequest) {
     manifest.totalJobsAllTime = totalJobsAllTime;
     await r2.saveManifest(manifest);
 
-    // Refresh the two derived files. Without this step, the dashboard's
-    // diagnostic widget keeps flagging a mismatch — the per-month stats files
-    // were just corrected, but aggregated-stats.json and stats/aggregate.json
-    // still hold the stale (pre-rebuild) totals until the next cron save().
-    //
-    // The legacy aggregated-stats.json is deleted so the next read forces a
-    // recompute. stats/aggregate.json is written here directly with the
-    // freshly-rebuilt data so the dashboard converges on next reload.
+    // Drop the cached aggregated-stats.json so the next read recomputes it
+    // from the freshly-rebuilt per-month stats files. Without this the
+    // dashboard would keep serving the stale (pre-rebuild) aggregate.
     let aggregateRefreshed = false;
     try {
       await r2.delete('aggregated-stats.json').catch(() => {});
-
-      const cache = getJobStatisticsCacheR2();
-      await cache.load(); // re-reads the rebuilt manifest + stats files
-      const aggResult = await cache.getAllArchivesAggregated();
-
-      const refreshedManifest = cache.getManifest();
-      if (refreshedManifest) {
-        await writeAggregateJson({
-          manifest: refreshedManifest,
-          currentMonthStats: cache.getCurrentStatistics(),
-          archives: aggResult.archives,
-          aggregatedStats: aggResult.aggregated,
-          totalJobs: aggResult.totalJobs,
-        });
-        aggregateRefreshed = true;
-      }
+      aggregateRefreshed = true;
     } catch (err) {
-      logger.error("Rebuild: aggregate refresh step failed (per-month stats still saved):", err);
+      logger.error("Rebuild: aggregate cache invalidation failed (per-month stats still saved):", err);
     }
 
     logger.info("=== Rebuild Complete ===");

@@ -51,7 +51,7 @@ import { getCompanyFromUrl, getCountryFromUrlTLD, resolvePostedDate } from "./co
 
 // Categories that qualify a job for the GOAT channel
 const GOAT_CATEGORIES = new Set([
-  "Corporate Finance & Accounting",
+  "Corporate Finance & Accounting", 
   "Quantitative Finance",
   "Private Equity & Venture Capital",
   "Investment Banking",

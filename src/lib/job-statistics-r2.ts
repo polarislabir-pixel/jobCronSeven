@@ -2,7 +2,6 @@ import { logger } from './logger';
 import { SalaryData } from './salary-extractor';
 import { getR2Storage, Manifest, ManifestDay } from './r2-storage';
 import { normalizeCity } from './location-extractor';
-import { writeDailyParquet, writeAggregateJson } from './job-statistics-parquet';
 
 /**
  * Normalize URL for consistent deduplication
@@ -652,27 +651,6 @@ export class JobStatisticsCacheR2 {
         monthData.days.sort((a, b) => a.date.localeCompare(b.date));
       }
 
-      // Dual-write: also persist the day as a Parquet file (Phase 1 of the
-      // storage redesign). On failure we log + continue — the NDJSON write
-      // above is still authoritative, so the cron must not fail because of
-      // a Parquet hiccup.
-      try {
-        const descById = new Map(allDescriptions.map(d => [d.id, d.description]));
-        const fullJobs = allMetadata.map(m =>
-          this.combineJob(m, { id: m.id, description: descById.get(m.id) ?? '' })
-        );
-        const { replacedKey } = await writeDailyParquet(dateKey, fullJobs, this.manifest!);
-        if (replacedKey) {
-          try {
-            await this.r2.delete(replacedKey);
-          } catch (err) {
-            logger.warn(`Failed to delete prior Parquet file ${replacedKey}:`, err);
-          }
-        }
-      } catch (err) {
-        logger.error(`Parquet dual-write failed for ${dateKey} (NDJSON write still succeeded):`, err);
-      }
-
       logger.info(`✓ Saved ${newJobs.length} new jobs for ${dateKey}`);
     }
 
@@ -955,11 +933,6 @@ export class JobStatisticsCacheR2 {
   /**
    * Persist aggregated stats to R2 so future reads skip computation.
    * Called from save() to keep the cache fresh after every write.
-   *
-   * Writes both the legacy `aggregated-stats.json` (kept until the DuckDB-WASM
-   * client read path ships) and the new `stats/aggregate.json` used by the
-   * Phase-2 instant-paint payload. Both are derived from the same in-memory
-   * computation, so there is no extra recompute cost.
    */
   private async saveAggregatedStats(): Promise<void> {
     if (!this.manifest) return;
@@ -969,21 +942,6 @@ export class JobStatisticsCacheR2 {
       ...result,
     }, 'public, max-age=60');
     logger.info(`✓ Saved aggregated stats: ${result.totalJobs} jobs across ${result.archives.length} months`);
-
-    // Phase 2 of the storage redesign: write the small, top-N-rolled aggregate
-    // the DuckDB-WASM client will use for instant first paint. Failures here
-    // are non-fatal — the legacy payload above is still served.
-    try {
-      await writeAggregateJson({
-        manifest: this.manifest,
-        currentMonthStats: this.currentMonthStats || this.createEmptyStatistics(),
-        archives: result.archives,
-        aggregatedStats: result.aggregated,
-        totalJobs: result.totalJobs,
-      });
-    } catch (err) {
-      logger.error('Failed to write stats/aggregate.json (legacy payload still saved):', err);
-    }
   }
 
   /**
